@@ -1,0 +1,14 @@
+app/database/__pycache__/__init__.cpython-313.pyc
+app/database/__pycache__/models.cpython-313.pyc
+app/database/__pycache__/sheet_service.cpython-313.pyc
+__pycache__/config.cpython-313.pyc
+credentials.json
+.env
+.idea/.gitignore
+.idea/misc.xml
+.idea/modules.xml
+.idea/PerfumeShopNew.iml
+.idea/vcs.xml
+.idea/inspectionProfiles/profiles_settings.xml
+.idea/inspectionProfiles/Project_Default.xml
+sheet_operations_queue.sqlite3
