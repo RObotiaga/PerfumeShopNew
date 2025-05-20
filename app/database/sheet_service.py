@@ -38,7 +38,7 @@ class AsyncSheetServiceWithQueue:
     def __init__(self, sheet_url: str, credentials_path: str, loop: Optional[asyncio.AbstractEventLoop] = None):
         self.sheet_url = sheet_url
         self.gsheet_credentials_path = os.path.abspath(credentials_path)
-        self.loop = loop or asyncio.get_running_loop()
+        self.loop = loop or asyncio.get_event_loop()
 
         self._in_memory_cache: Dict[str, List[Dict[str, Any]]] = {}
         self._in_memory_cache_last_updated: Dict[str, float] = {}
