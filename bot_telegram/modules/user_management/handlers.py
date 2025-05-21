@@ -1,61 +1,79 @@
- # bot_telegram/modules/user_management/handlers.py
+# bot_telegram/modules/user_management/handlers.py
 import logging
 import datetime
 
 from aiogram import Router, F, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery  # CallbackQuery уже был, но теперь используется активнее
 
 from app.database import AsyncSheetServiceWithQueue, User
-from bot_telegram.states.user_interaction_states import UserAgreement
-from .keyboards import get_agreement_keyboard, get_main_menu_keyboard, get_view_agreement_keyboard
-from bot_telegram.utils.callback_data_factory import UserAgreementCallback
-from bot_telegram.bot_config import USER_AGREEMENT_PATH
+from bot_telegram.states.user_interaction_states import UserAgreement, CatalogNavigation  # ДОБАВЛЕН CatalogNavigation
+from .keyboards import get_agreement_keyboard, get_main_menu_keyboard
+from bot_telegram.utils.callback_data_factory import UserAgreementCallback, \
+    NavigationCallback  # ДОБАВЛЕН NavigationCallback
 
 logger = logging.getLogger(__name__)
 user_router = Router()
 
-# Предполагается, что sheet_service будет передан в router или доступен через middleware
-# Пока что для простоты сделаем его глобальным в этом модуле (не лучший подход для прода)
-# В bot_main.py мы передадим его корректно.
+
+# Функция для отправки или редактирования главного меню
+async def send_or_edit_main_menu(message_or_query: Message | CallbackQuery, state: FSMContext, text: str | None = None):
+    user_full_name = message_or_query.from_user.full_name
+    if text is None:
+        text = f"{user_full_name}, добро пожаловать в главное меню!"
+
+    # Убираем предыдущее состояние, если мы перешли в главное меню
+    # кроме случая, когда мы уже в главном меню и просто нажимаем кнопку "В главное меню"
+    # current_state = await state.get_state()
+    # if current_state is not None: # Это вызовет проблемы, если главное меню - это тоже состояние
+    await state.clear()  # Пока очищаем состояние при любом входе в главное меню
+
+    if isinstance(message_or_query, Message):
+        await message_or_query.answer(text, reply_markup=get_main_menu_keyboard())
+    elif isinstance(message_or_query, CallbackQuery):
+        if message_or_query.message:
+            try:
+                await message_or_query.message.edit_text(text, reply_markup=get_main_menu_keyboard())
+            except Exception:  # Если сообщение не изменилось или другая ошибка редактирования
+                await message_or_query.message.answer(text, reply_markup=get_main_menu_keyboard())
+                await message_or_query.message.delete()  # Удаляем старое сообщение с инлайн кнопками, если не смогли отредактировать
+            await message_or_query.answer()
+
 
 async def send_agreement_prompt(message: Message, state: FSMContext, user_exists: bool = False):
     greeting_text = (
         f"Здравствуйте, {message.from_user.full_name}!\n"
         "Добро пожаловать в наш магазин парфюмерии Robotiaga Perfumes!\n\n"
-        "Для продолжения, пожалуйста, ознакомьтесь с нашей Политикой обработки персональных данных и примите ее условия."
+        "Для продолжения, пожалуйста, ознакомьтесь с нашей Политикой обработки персональных данных (ссылка ниже) и примите ее условия."
     )
     if user_exists:
         greeting_text = (
             f"С возвращением, {message.from_user.full_name}!\n"
             "Кажется, вы ранее не приняли условия Политики обработки персональных данных. "
-            "Для продолжения, пожалуйста, ознакомьтесь и примите их."
+            "Для продолжения, пожалуйста, ознакомьтесь (ссылка ниже) и примите их."
         )
     await message.answer(greeting_text, reply_markup=get_agreement_keyboard())
     await state.set_state(UserAgreement.awaiting_agreement)
 
+
 @user_router.message(CommandStart())
 async def handle_start(message: Message, state: FSMContext, sheet_service: AsyncSheetServiceWithQueue):
     user_id = message.from_user.id
-    logger.info(f"User {user_id} started the bot.")
-    await state.clear() # Очищаем предыдущее состояние на всякий случай
+    logger.info(f"User {user_id} ({message.from_user.full_name}) started the bot.")
+    await state.clear()
 
-    # Проверяем, есть ли пользователь в базе и принял ли он соглашение
     user_data_list = await sheet_service.read_rows_from_cache("Пользователи", filter_criteria={"user_id": user_id})
 
     if user_data_list:
         user_gsheet_data = user_data_list[0]
-        # В модели is_active и agreement_accepted_at могут быть None если что-то пошло не так при записи
-        # или если колонки пустые.
-        # Для GSheet "TRUE" / "FALSE" строки, а agreement_accepted_at - дата/время или пусто
         agreement_accepted = bool(user_gsheet_data.get("agreement_accepted_at")) and \
                              str(user_gsheet_data.get("is_active", "")).upper() == "TRUE"
 
         if agreement_accepted:
             logger.info(f"User {user_id} already accepted agreement. Sending main menu.")
-            await message.answer(f"С возвращением, {message.from_user.full_name}! 👋", reply_markup=get_main_menu_keyboard())
-            # Здесь можно будет установить состояние главного меню, если потребуется
+            # ИЗМЕНЕНО: Отправляем инлайн меню
+            await send_or_edit_main_menu(message, state, f"С возвращением, {message.from_user.full_name}! 👋")
         else:
             logger.info(f"User {user_id} exists but has not accepted/active agreement. Prompting again.")
             await send_agreement_prompt(message, state, user_exists=True)
@@ -64,46 +82,9 @@ async def handle_start(message: Message, state: FSMContext, sheet_service: Async
         await send_agreement_prompt(message, state)
 
 
-@user_router.callback_query(UserAgreementCallback.filter(F.action == "view"), UserAgreement.awaiting_agreement)
-async def handle_view_agreement_callback(query: CallbackQuery, state: FSMContext):
-    try:
-        with open(USER_AGREEMENT_PATH, "r", encoding="utf-8") as f:
-            agreement_text = f.read()
-        # Ограничение Telegram на длину сообщения ~4096 символов.
-        # Если текст очень длинный, его нужно будет разбить или отправить файлом.
-        # Пока предполагаем, что он умещается.
-        if len(agreement_text) > 4000: # Небольшой запас
-             agreement_text = agreement_text[:4000] + "\n...(полный текст слишком длинный для одного сообщения)..."
-
-        await query.message.edit_text(agreement_text, reply_markup=get_view_agreement_keyboard())
-        await query.answer()
-    except FileNotFoundError:
-        logger.error(f"User agreement file not found at {USER_AGREEMENT_PATH}")
-        await query.answer("Не удалось загрузить текст соглашения. Пожалуйста, попробуйте позже.", show_alert=True)
-    except Exception as e:
-        logger.error(f"Error reading user agreement: {e}")
-        await query.answer("Произошла ошибка при загрузке соглашения.", show_alert=True)
-
-
-@user_router.callback_query(UserAgreementCallback.filter(F.action == "back_to_options"), UserAgreement.awaiting_agreement)
-async def handle_back_to_agreement_options_callback(query: CallbackQuery, state: FSMContext):
-    # Это обработчик для кнопки "Назад" из просмотра текста соглашения
-    # По сути, просто переотправляем исходное сообщение с выбором
-    greeting_text = (
-        f"Здравствуйте, {query.from_user.full_name}!\n"
-        "Добро пожаловать в наш магазин парфюмерии Robotiaga Perfumes!\n\n"
-        "Для продолжения, пожалуйста, ознакомьтесь с нашей Политикой обработки персональных данных и примите ее условия."
-    )
-    # Проверяем, есть ли такое сообщение, чтобы отредактировать, иначе новое
-    if query.message:
-        await query.message.edit_text(greeting_text, reply_markup=get_agreement_keyboard())
-    else:
-        await query.bot.send_message(query.from_user.id, greeting_text, reply_markup=get_agreement_keyboard())
-    await query.answer()
-
-
 @user_router.callback_query(UserAgreementCallback.filter(F.action == "accept"), UserAgreement.awaiting_agreement)
-async def handle_accept_agreement_callback(query: CallbackQuery, state: FSMContext, sheet_service: AsyncSheetServiceWithQueue):
+async def handle_accept_agreement_callback(query: CallbackQuery, state: FSMContext,
+                                           sheet_service: AsyncSheetServiceWithQueue):
     user = query.from_user
     logger.info(f"User {user.id} accepted the agreement.")
 
@@ -112,48 +93,124 @@ async def handle_accept_agreement_callback(query: CallbackQuery, state: FSMConte
         "username": user.username or "",
         "first_name": user.first_name or "",
         "last_name": user.last_name or "",
-        "agreement_accepted_at": datetime.datetime.now().isoformat(), # Сохраняем в ISO для совместимости с разными форматами дат
-        "is_active": "TRUE" # Используем строку "TRUE" как в вашей GSheet модели
+        "agreement_accepted_at": datetime.datetime.now().isoformat(),
+        "is_active": "TRUE"
     }
 
-    # Пытаемся найти пользователя, чтобы обновить, или создаем нового
     existing_user_list = await sheet_service.read_rows_from_cache("Пользователи", filter_criteria={"user_id": user.id})
 
     if existing_user_list:
-        # Обновляем существующего пользователя
         update_result = await sheet_service.update_rows(
             sheet_alias="Пользователи",
             filter_criteria={"user_id": user.id},
             new_data_payload=user_data_payload
         )
         if update_result > 0:
-            logger.info(f"User {user.id} data updated in GSheet.")
+            logger.info(f"User {user.id} data update queued/optimistically updated.")
         else:
-            logger.error(f"Failed to update user {user.id} data in GSheet. Queue ID or error logged in sheet_service.")
-            # Можно отправить сообщение об ошибке, но пока просто продолжаем
+            logger.error(f"Failed to queue update for user {user.id} data. See sheet_service logs.")
     else:
-        # Создаем нового пользователя
         created_user = await sheet_service.create_row("Пользователи", user_data_payload)
         if created_user:
-            logger.info(f"New user {user.id} data created in GSheet.")
+            logger.info(f"New user {user.id} data queued/optimistically created.")
         else:
-            logger.error(f"Failed to create user {user.id} data in GSheet. Queue ID or error logged in sheet_service.")
-            # Можно отправить сообщение об ошибке
+            logger.error(f"Failed to queue creation for user {user.id} data. See sheet_service logs.")
 
     await query.answer("Спасибо! Вы приняли условия.", show_alert=False)
-    if query.message: # Удаляем инлайн клавиатуру соглашения
-        await query.message.delete_reply_markup()
-        await query.message.answer("Отлично! Теперь вы можете пользоваться всеми функциями бота.", reply_markup=get_main_menu_keyboard())
-    else: # Если вдруг query.message нет (маловероятно для callback)
-        await query.bot.send_message(user.id, "Отлично! Теперь вы можете пользоваться всеми функциями бота.", reply_markup=get_main_menu_keyboard())
+    text_after_agreement = "Отлично! Теперь вы можете пользоваться всеми функциями бота."
+    if query.message:
+        # Удаляем старое сообщение с кнопками соглашения
+        await query.message.delete()
+        # Отправляем новое сообщение с главным меню
+        await query.message.answer(text_after_agreement, reply_markup=get_main_menu_keyboard())
+    else:  # Маловероятно для callback
+        await query.bot.send_message(user.id, text_after_agreement, reply_markup=get_main_menu_keyboard())
 
-    await state.clear() # Сбрасываем состояние
+    await state.clear()  # Сбрасываем состояние (UserAgreement.awaiting_agreement)
+
+
+# --- ОБНОВЛЕННЫЕ/НОВЫЕ ОБРАБОТЧИКИ ДЛЯ КНОПОК ГЛАВНОГО МЕНЮ (Inline) ---
+
+# Обработчик для кнопки "В главное меню" из других разделов
+@user_router.callback_query(NavigationCallback.filter(F.to == "main_menu"))
+async def handle_nav_to_main_menu(query: CallbackQuery, state: FSMContext):
+    logger.info(f"User {query.from_user.id} navigated to main menu.")
+    await send_or_edit_main_menu(query, state)
+    await query.answer()
+
+
+# Обработчик для кнопки "Каталог" (переход к хэндлерам каталога)
+# Он останется здесь, но основная логика каталога будет в catalog/handlers.py
+# Этот обработчик будет импортирован и использован в catalog_router или наоборот,
+# catalog_router будет импортирован в user_router.
+# Пока что оставим как заглушку, и потом перенесем/дополним.
+# @user_router.callback_query(NavigationCallback.filter(F.to == "catalog"), StateFilter(None))
+# async def handle_catalog_button_nav(query: CallbackQuery, state: FSMContext, sheet_service: AsyncSheetServiceWithQueue):
+#     logger.info(f"User {query.from_user.id} pressed 'Каталог' from main menu.")
+#     await state.set_state(CatalogNavigation.choosing_category)
+#     # Здесь будет логика отображения категорий из catalog/handlers.py
+#     # Например: await show_categories(query, state, sheet_service)
+#     # Пока что:
+#     if query.message:
+#         await query.message.edit_text("Вы выбрали 'Каталог'. Загружаем категории...", reply_markup=None) # Убрать старые кнопки
+#     await query.answer("Загрузка категорий...")
+# Эта логика будет перенесена в catalog_handlers.py
+
+
+@user_router.callback_query(NavigationCallback.filter(F.to == "cart"),
+                            StateFilter(None))  # StateFilter(None) - если из главного меню (нет состояния)
+async def handle_cart_button_nav(query: CallbackQuery, state: FSMContext):
+    logger.info(f"User {query.from_user.id} pressed 'Корзина'")
+    if query.message:
+        await query.message.edit_text("Вы выбрали 'Корзина'. Этот раздел сейчас в разработке.",
+                                      reply_markup=get_main_menu_keyboard())  # Для примера оставляем меню
+    await query.answer()
+
+
+@user_router.callback_query(NavigationCallback.filter(F.to == "my_orders"), StateFilter(None))
+async def handle_my_orders_button_nav(query: CallbackQuery, state: FSMContext):
+    logger.info(f"User {query.from_user.id} pressed 'Мои заказы'")
+    if query.message:
+        await query.message.edit_text("Вы выбрали 'Мои заказы'. Этот раздел сейчас в разработке.",
+                                      reply_markup=get_main_menu_keyboard())
+    await query.answer()
+
+
+@user_router.callback_query(NavigationCallback.filter(F.to == "info"), StateFilter(None))
+async def handle_info_button_nav(query: CallbackQuery, state: FSMContext):
+    logger.info(f"User {query.from_user.id} pressed 'Информация о магазине'")
+    # ТЗ (3.1.1.3): Кнопки отображаются в виде клавиатуры Telegram. Это было для Reply.
+    # Теперь это инлайн, текст будет в сообщении.
+    info_text = "Robotiaga Perfumes - ваш лучший выбор изысканной парфюмерии.\nКонтакты: @your_admin_contact\nЧасы работы: 10:00 - 20:00"
+    if query.message:
+        await query.message.edit_text(info_text,
+                                      reply_markup=get_main_menu_keyboard())  # Можно добавить кнопку "Назад в меню" или оставить полное меню
+    await query.answer()
+
+
+@user_router.callback_query(NavigationCallback.filter(F.to == "help"), StateFilter(None))
+async def handle_help_button_nav(query: CallbackQuery, state: FSMContext):
+    logger.info(f"User {query.from_user.id} pressed 'Помощь'")
+    # ТЗ (7): "Связаться с менеджером" (переход в чат с Telegram-менеджером).
+    # Текст после нажатия: "Здравствуйте! Ваш запрос принят в обработку..."
+    help_text = "Здравствуйте! Ваш запрос принят в обработку, мы на связи с 11:00 - 22:00(нск), скоро свяжемся с вами! ❤️\n\nВы также можете написать напрямую нашему менеджеру: @YourAdminUsername"  # Замените на реальный username
+    if query.message:
+        # Можно добавить кнопку для прямого перехода к менеджеру, если он публичный
+        # builder = InlineKeyboardBuilder()
+        # builder.button(text="✍️ Написать менеджеру", url="https://t.me/YourAdminUsername")
+        # builder.button(text="⬅️ В главное меню", callback_data=NavigationCallback(to="main_menu").pack())
+        # await query.message.edit_text(help_text, reply_markup=builder.as_markup())
+        await query.message.edit_text(help_text, reply_markup=get_main_menu_keyboard())  # Пока оставим полное меню
+    await query.answer()
 
 
 # Обработчик для текстовых сообщений, если пользователь не в каком-то конкретном состоянии
-# и пытается что-то написать вместо нажатия кнопок главного меню.
-@user_router.message(F.text, lambda msg: msg.text not in ["🛍️ Каталог", "🛒 Корзина", "📦 Мои заказы", "ℹ️ Информация о магазине", "❓ Помощь"])
-async def handle_unknown_text_commands_main_menu(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None: # Только если мы в "главном меню" (нет состояния)
-        await message.reply("Пожалуйста, используйте кнопки меню для навигации. 👇", reply_markup=get_main_menu_keyboard())
+# и пытается что-то написать. Для инлайн меню этот обработчик менее актуален,
+# но может словить случайный текст.
+@user_router.message(F.text, StateFilter(None))
+async def handle_unknown_text_main_menu(message: Message, state: FSMContext):
+    logger.info(f"User {message.from_user.id} sent unknown text '{message.text}' while in main menu (no state).")
+    await message.reply(
+        "Пожалуйста, используйте кнопки для навигации. 👇",
+        reply_markup=get_main_menu_keyboard()  # Отправляем инлайн-меню в ответ
+    )
