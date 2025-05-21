@@ -3,25 +3,26 @@ import os
 import logging
 
 # Logging setup
-# (оставляем как есть)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s",
 )
-
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+print(ROOT_DIR)
 # Path to Google credentials file
-CREDENTIALS_JSON_PATH = "credentials.json"
-
+CREDENTIALS_JSON_NAME = "credentials.json"
+CREDENTIALS_JSON_PATH = os.path.join(ROOT_DIR, CREDENTIALS_JSON_NAME)
 # Google Sheet URL
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1BqVMocZczXIVy1i6LG97VOy3HA65jBxd2jsEZjcTf8c/edit?gid=0#gid=0"
 
-# Expected sheet titles in Google Sheet
+# Expected sheet titles in Google Sheet (ДОБАВЛЕН "Пользователи")
 EXPECTED_SHEET_TITLES = [
     "Товары",
     "Заказы",
     "Тип доставки",
     "Настройка платежей",
     "Рассылки",
+    "Пользователи",
 ]
 
 # Cache settings
